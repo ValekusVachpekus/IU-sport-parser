@@ -47,9 +47,24 @@ class SportClient:
         self._sso = sso
         self._cookies: dict[int, dict[str, str]] = {}
         self._locks: dict[int, asyncio.Lock] = {}
+        self._clients: dict[int, httpx.AsyncClient] = {}
 
     def _lock(self, tg_id: int) -> asyncio.Lock:
         return self._locks.setdefault(tg_id, asyncio.Lock())
+
+    def _client_for(self, tg_id: int) -> httpx.AsyncClient:
+        client = self._clients.get(tg_id)
+        if client is None or client.is_closed:
+            client = httpx.AsyncClient(
+                timeout=20.0, base_url=self._sso.site_root, follow_redirects=False
+            )
+            self._clients[tg_id] = client
+        return client
+
+    async def aclose(self) -> None:
+        clients, self._clients = list(self._clients.values()), {}
+        for client in clients:
+            await client.aclose()
 
     # --- session management ---
     def _load_cached_cookies(self, user: User) -> dict[str, str] | None:
@@ -103,14 +118,12 @@ class SportClient:
         url = f"{self._api_base}/{path.lstrip('/')}"
         async with self._lock(user.tg_id):
             cookies = await self._cookies_for(user)
-            async with httpx.AsyncClient(
-                timeout=20.0, base_url=self._sso.site_root, follow_redirects=False
-            ) as client:
+            client = self._client_for(user.tg_id)
+            resp = await self._send(client, method, url, cookies, **kwargs)
+            if resp.status_code in (401, 403):
+                self._cookies.pop(user.tg_id, None)
+                cookies = await self._relogin(user)
                 resp = await self._send(client, method, url, cookies, **kwargs)
-                if resp.status_code in (401, 403):
-                    self._cookies.pop(user.tg_id, None)
-                    cookies = await self._relogin(user)
-                    resp = await self._send(client, method, url, cookies, **kwargs)
         if resp.status_code in (401, 403):
             raise AuthExpired("сессия недействительна после повторного входа")
         return resp
@@ -127,6 +140,9 @@ class SportClient:
         if method.upper() != "GET" and cookies.get("csrftoken"):
             headers["X-CSRFToken"] = cookies["csrftoken"]
         headers.update(kwargs.pop("headers", {}))
+        # The persistent client accumulates Set-Cookie responses in its jar; drop them
+        # so only our explicit (possibly refreshed) cookies are ever sent.
+        client.cookies.clear()
         return client.request(method, url, headers=headers, cookies=cookies, **kwargs)
 
     # --- API methods ---

@@ -60,7 +60,10 @@ async def main() -> None:
     )
 
     log.info("starting bot polling")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await client.aclose()
 
 
 if __name__ == "__main__":

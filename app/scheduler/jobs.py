@@ -43,7 +43,8 @@ async def burst_check_in(
     interval = settings.burst_interval_ms / 1000.0
     deadline = datetime.now(timezone.utc).timestamp() + settings.burst_max_seconds
 
-    # Pre-warm the auth token so the first real attempt is instant.
+    # Pre-warm the auth token and the persistent TCP/TLS connection so the
+    # first real attempt is instant.
     user = await db.get_user(tg_id)
     if user is not None:
         try:
@@ -74,6 +75,7 @@ async def watch_check_in(
 ) -> None:
     user = await db.get_user(tg_id)
     if user is None:
+        _remove(scheduler, f"watch:{rule_id}:{training_id}")
         return
     try:
         info = await client.get_training(user, training_id)
